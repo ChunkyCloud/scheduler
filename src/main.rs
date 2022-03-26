@@ -7,6 +7,7 @@ mod scheduler;
 mod queue;
 mod api_server;
 mod error;
+mod util;
 
 use std::borrow::Borrow;
 use log::*;
