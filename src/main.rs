@@ -1,31 +1,32 @@
-mod rendernode;
-mod invalid_endpoint;
-mod message;
+mod endpoint;
+mod scheduler;
+mod util;
+
 mod args;
 mod state;
-mod scheduler;
-mod queue;
-mod api_server;
-mod error;
-mod util;
 
 use std::borrow::Borrow;
 use log::*;
 use std::net::SocketAddr;
+use std::time::Duration;
 use clap::Parser;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::{accept_hdr_async, WebSocketStream};
+use tokio::try_join;
+use tokio_tungstenite::accept_hdr_async;
 use tokio_tungstenite::tungstenite;
 use tungstenite::handshake::server::{Request, Response};
 use tungstenite::http::Uri;
 use uuid::Uuid;
 use crate::state::Backend;
-use crate::error::{Result, Error};
+use util::error::{Error, Result};
+use crate::scheduler::heap_scheduler::HeapScheduler;
+use crate::util::queue;
+use crate::util::websocket::{MessageWsStream, MessageWsStreamHandler};
 
 async fn accept_connection(peer: SocketAddr, stream: TcpStream, backend: Backend) {
     if let Err(e) = handle_connection(peer, stream, backend).await {
         match e {
-            Error::WsError(e) => {
+            Error::Ws(e) => {
                 match e.borrow() {
                     tungstenite::Error::ConnectionClosed => (),
                     tungstenite::Error::Protocol(_) => (),
@@ -33,8 +34,17 @@ async fn accept_connection(peer: SocketAddr, stream: TcpStream, backend: Backend
                     e => error!("Error processing connection: {:?}", e),
                 }
             },
-            Error::SerdeError(e) => {
+            Error::Serde(e) => {
                 error!("Error while (de)serializing: {:?}", e);
+            },
+            Error::Queue(e) => {
+                match e.borrow() {
+                    queue::Error::Closed => (),
+                    queue::Error::Full => error!("Full queue."),
+                }
+            }
+            Error::Generic(e) => {
+                error!("Error: {}", e);
             }
         }
     }
@@ -52,14 +62,15 @@ async fn handle_connection(peer: SocketAddr, stream: TcpStream, backend: Backend
             let peer_target = peer_id.to_string();
             info!(target: &peer_target, "New WebSocket connection: {}", peer);
 
-            match handle_endpoint(peer_id, peer_target.clone(), uri, ws_stream, backend).await {
-                Err(Error::WsError(e)) => {
+            let handler = MessageWsStreamHandler::new(ws_stream, &peer_target, &Duration::from_secs(30));
+            match try_join!(handle_endpoint(peer_id, handler.message_stream(), uri, backend), handler.handle()) {
+                Err(Error::Ws(e)) => {
                     info!(target: &peer_target, "Websocket error: {:?}", e);
-                    return Err(Error::WsError(e));
+                    return Err(Error::Ws(e));
                 },
-                Err(Error::SerdeError(e)) => {
+                Err(Error::Serde(e)) => {
                     error!(target: &peer_target, "Uncaught (de)serialization error: {:?}", e);
-                    return Err(Error::SerdeError(e));
+                    return Err(Error::Serde(e));
                 }
                 _ => {},
             }
@@ -71,19 +82,19 @@ async fn handle_connection(peer: SocketAddr, stream: TcpStream, backend: Backend
     Ok(())
 }
 
-async fn handle_endpoint(peer_id: Uuid, peer_target: String, uri: Option<Uri>, stream: WebSocketStream<TcpStream>, backend: Backend) -> Result<()> {
+async fn handle_endpoint(peer_id: Uuid, stream: MessageWsStream, uri: Option<Uri>, backend: Backend) -> Result<()> {
     match uri {
         None => {
-            info!(target: &peer_target, "Connection had no path.");
-            invalid_endpoint::accept(stream).await?;
+            info!(target: stream.target(), "Connection had no path.");
+            endpoint::invalid::accept(stream).await?;
         }
         Some(uri) => {
             let path = uri.path();
-            info!(target: &peer_target, "Connection to: {}", path);
+            info!(target: &peer_id.to_string(), "Connection to: {}", path);
             match path {
-                "/apiserver" => api_server::accept(peer_id, stream, uri, backend).await?,
-                "/rendernode" => rendernode::accept(peer_id, stream, uri, backend).await?,
-                _ => invalid_endpoint::accept(stream).await?,
+                "/apiserver" => endpoint::api_server::accept(peer_id, stream, uri, backend).await?,
+                "/rendernode" => endpoint::rendernode::accept(peer_id, stream, uri, backend).await?,
+                _ => endpoint::invalid::accept(stream).await?,
             }
         }
     }
@@ -102,7 +113,7 @@ async fn main() {
         })
         .init();
 
-    let backend = Backend::new(cli.admin_key);
+    let backend = Backend::new(cli.admin_key, HeapScheduler::new());
 
     let addr = "127.0.0.1:5700";
     let listener = TcpListener::bind(&addr)

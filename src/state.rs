@@ -1,17 +1,17 @@
-use crate::scheduler::Task;
-use crate::queue::Queue;
+use std::sync::Arc;
+use crate::scheduler::Scheduler;
 
 #[derive(Clone)]
 pub struct Backend {
     pub admin_token: Option<String>,
-    pub work_queue: Queue<Task>,
+    pub scheduler: Arc<dyn Scheduler + Send + Sync>,
 }
 
 impl Backend {
-    pub fn new(admin_token: Option<String>) -> Backend {
+    pub fn new<T: 'static>(admin_token: Option<String>, scheduler: T) -> Backend where T: Scheduler + Send + Sync {
         Backend {
             admin_token: admin_token.clone(),
-            work_queue: Queue::new(),
+            scheduler: Arc::new(scheduler),
         }
     }
 }

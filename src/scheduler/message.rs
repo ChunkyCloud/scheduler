@@ -1,7 +1,8 @@
+use std::hash::{Hash, Hasher};
 use serde::{Deserialize, Serialize};
-use crate::error::{Result, Error};
+use crate::util::error::{Result, Error};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum Message {
     /// Some error that will result in this connection being closed.
     Error(ErrorMessage),
@@ -15,34 +16,46 @@ pub enum Message {
 
     /// A request for a task.
     TaskGet(),
-    /// A response that there is no task currently available. A new task will be sent as soon
-    /// as one is available.
-    TaskWait(),
     /// A task message containing a job id and a number of samples to render.
     Task(TaskMessage),
-    /// An acknowledgement a task has been received and will be processed
-    TaskAck(),
+    /// A notification that a task has been completed.
+    TaskComplete(),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ErrorMessage {
     pub message: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct WarningMessage {
     pub message: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct AuthenticationMessage {
     pub token: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct TaskMessage {
+    pub task_id: String,
     pub job_id: String,
     pub spp: u32,
+}
+
+impl Hash for TaskMessage {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.task_id.hash(state);
+    }
+}
+
+impl Eq for TaskMessage {}
+
+impl PartialEq<Self> for TaskMessage {
+    fn eq(&self, other: &Self) -> bool {
+        self.task_id.eq(&other.task_id)
+    }
 }
 
 
