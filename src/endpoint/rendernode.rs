@@ -1,5 +1,7 @@
 use std::cell::Cell;
 use log::*;
+use mongodb::bson::{doc, Document};
+use mongodb::options::FindOneOptions;
 use tungstenite::http::Uri;
 use uuid::Uuid;
 use crate::{Backend, MessageWsStream};
@@ -9,17 +11,29 @@ use crate::util::error::Result;
 pub async fn accept(_peer_id: Uuid, stream: MessageWsStream, _uri: Uri, backend: Backend) -> Result<()> {
     // Authenticate
     stream.send(Message::AuthenticationRequest()).await?;
-    loop {
-        match stream.poll().await? {
-            Message::Authentication(m) => {
-                info!(target: stream.target(), "API key: {}", m.token);
-                break;
-            }
-            m => {
-                debug!(target: stream.target(), "Incorrect message: {:?}", m);
+    match stream.poll().await? {
+        Message::Authentication(m) => {
+            info!(target: stream.target(), "API key: {}", m.token);
+            if let Some(client) = &backend.mongo_client {
+                let filter = doc! { "apiKey": m.token };
+                let find_options = FindOneOptions::default();
+
+                if let Some(user) = client
+                    .database("renderservice")
+                    .collection::<Document>("users")
+                    .find_one(filter, find_options)
+                    .await? {
+                    info!(target: stream.target(), "User authenticated: {}", user.get_str("username").unwrap_or("<UNKNOWN>"));
+                } else {
+                    info!(target: stream.target(), "Failed to authenticate.");
+                    return stream.close().await;
+                }
             }
         }
-        stream.send(Message::AuthenticationRequest()).await?;
+        m => {
+            debug!(target: stream.target(), "Incorrect message: {:?}", m);
+            return stream.close().await;
+        }
     }
 
     // Handle task messages

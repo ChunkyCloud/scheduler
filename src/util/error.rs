@@ -8,7 +8,8 @@ pub enum Error {
     Ws(Box<tungstenite::Error>),
     Serde(Box<serde_json::Error>),
     Queue(Box<queue::Error>),
-    Generic(Box<String>),
+    Mongo(Box<mongodb::error::Error>),
+    Generic(String),
 }
 
 impl From<tungstenite::Error> for Error {
@@ -26,5 +27,11 @@ impl From<serde_json::Error> for Error {
 impl From<queue::Error> for Error {
     fn from(e: queue::Error) -> Self {
         Error::Queue(Box::new(e))
+    }
+}
+
+impl From<mongodb::error::Error> for Error {
+    fn from(e: mongodb::error::Error) -> Self {
+        Error::Mongo(Box::new(e))
     }
 }

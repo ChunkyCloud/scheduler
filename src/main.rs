@@ -3,7 +3,7 @@ mod scheduler;
 mod util;
 
 mod args;
-mod state;
+mod backend;
 
 use std::borrow::Borrow;
 use log::*;
@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite;
 use tungstenite::handshake::server::{Request, Response};
 use tungstenite::http::Uri;
 use uuid::Uuid;
-use crate::state::Backend;
+use crate::backend::Backend;
 use util::error::{Error, Result};
 use crate::scheduler::heap_scheduler::HeapScheduler;
 use crate::util::queue;
@@ -42,6 +42,9 @@ async fn accept_connection(peer: SocketAddr, stream: TcpStream, backend: Backend
                     queue::Error::Closed => (),
                     queue::Error::Full => error!("Full queue."),
                 }
+            }
+            Error::Mongo(e) => {
+                error!("MongoDB error: {:?}", e);
             }
             Error::Generic(e) => {
                 error!("Error: {}", e);
@@ -113,7 +116,16 @@ async fn main() {
         })
         .init();
 
-    let backend = Backend::new(cli.admin_key, HeapScheduler::new());
+    if cli.admin_key.is_none() {
+        warn!("Admin key is empty!");
+    }
+
+    if cli.mongo.is_none() {
+        warn!("Mongo URL is empty!");
+    }
+
+    let backend = Backend::new(cli.admin_key, cli.mongo,
+                               HeapScheduler::new()).await;
 
     let addr = "127.0.0.1:5700";
     let listener = TcpListener::bind(&addr)
