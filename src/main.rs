@@ -19,7 +19,7 @@ use tungstenite::http::Uri;
 use uuid::Uuid;
 use crate::backend::Backend;
 use util::error::{Error, Result};
-use crate::scheduler::heap_scheduler::HeapScheduler;
+use crate::scheduler::heap_scheduler::HeapSchedulerFactory;
 use crate::util::queue;
 use crate::util::websocket::{MessageWsStream, MessageWsStreamHandler};
 
@@ -125,7 +125,7 @@ async fn main() {
     }
 
     let backend = Backend::new(cli.admin_key, cli.mongo,
-                               HeapScheduler::new()).await;
+                               HeapSchedulerFactory {}).await;
 
     let addr = "127.0.0.1:5700";
     let listener = TcpListener::bind(&addr)

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use log::error;
 use crate::scheduler::Scheduler;
+use crate::scheduler::SchedulerFactory;
 
 #[derive(Clone)]
 pub struct Backend {
@@ -10,8 +11,8 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub async fn new<T: 'static>(admin_token: Option<String>, mongo_url: Option<String>, scheduler: T) -> Backend where T: Scheduler + Send + Sync {
-        let client = match mongo_url {
+    async fn mongo_client(mongo_url: Option<String>) -> Option<mongodb::Client> {
+        match mongo_url {
             None => None,
             Some(url) => match mongodb::Client::with_uri_str(url).await {
                 Ok(client) => Some(client),
@@ -20,12 +21,17 @@ impl Backend {
                     None
                 }
             },
-        };
+        }
+    }
 
+    pub async fn new<T: 'static, F>(admin_token: Option<String>, mongo_url: Option<String>, scheduler: F) -> Backend
+        where T: Scheduler + Send + Sync, F: SchedulerFactory<T> {
+
+        let client = Backend::mongo_client(mongo_url).await;
         Backend {
             admin_token: admin_token.clone(),
-            mongo_client: client,
-            scheduler: Arc::new(scheduler),
+            mongo_client: client.clone(),
+            scheduler: Arc::new(scheduler.create(client).await),
         }
     }
 }

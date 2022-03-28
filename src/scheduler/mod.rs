@@ -19,3 +19,8 @@ pub trait Scheduler {
     fn fail(&self, task: TaskMessage);
 }
 
+#[async_trait]
+pub trait SchedulerFactory<T> where T: Scheduler + Send + Sync {
+    /// Create a new scheduler and pull tasks from mongodb
+    async fn create(&self, mongo: Option<mongodb::Client>) -> T;
+}

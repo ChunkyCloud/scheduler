@@ -236,6 +236,10 @@ impl <T> PriorityQueue<T> where T: Ord {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.heap.lock().unwrap().len()
+    }
+
     pub fn push(&self, item: T) {
         self.heap.lock().unwrap().push(item);
         self.notify.notify_waiters();

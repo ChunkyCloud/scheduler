@@ -151,6 +151,7 @@ impl <T> MessageWsStreamHandler<T> where T: AsyncRead + AsyncWrite + Unpin {
                         debug!(target: target, "Invalid message: {}", m);
                     }
                 }
+                tokio::task::yield_now().await;
             }
         }
         Ok(())
