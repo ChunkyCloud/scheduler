@@ -2,6 +2,7 @@ use std::cell::Cell;
 use log::*;
 use mongodb::bson::{doc, Document};
 use mongodb::options::FindOneOptions;
+use tokio::runtime::Handle;
 use tungstenite::http::Uri;
 use uuid::Uuid;
 use crate::{Backend, MessageWsStream};
@@ -54,7 +55,7 @@ pub async fn accept(_peer_id: Uuid, stream: MessageWsStream, _uri: Uri, backend:
                     Some(task) => {
                         // Illegal state
                         info!(target: stream.target(), "Illegal state. Rendering task {:?} but TaskGet received. Rescheduling task.", &task);
-                        backend.scheduler.fail(task);
+                        backend.scheduler.fail(task).await?;
                         stream.send(Message::error_message("Illegal state. Task assigned and was expecting TaskComplete but TaskGet message received.")).await?;
                         stream.close().await?;
                     }
@@ -64,7 +65,7 @@ pub async fn accept(_peer_id: Uuid, stream: MessageWsStream, _uri: Uri, backend:
                 match task {
                     Some(task) => {
                         info!(target: stream.target(), "Task completed: {:?}", &task);
-                        backend.scheduler.complete(task);
+                        backend.scheduler.complete(task).await?;
                         guard.task.set(None);
                     }
                     None => {
@@ -90,7 +91,8 @@ struct TaskGuard {
 impl Drop for TaskGuard {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
-            self.backend.scheduler.fail(task);
+            let handle = Handle::current();
+            handle.block_on(self.backend.scheduler.fail(task)).unwrap();
         }
     }
 }

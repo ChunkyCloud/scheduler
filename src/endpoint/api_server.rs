@@ -32,7 +32,7 @@ pub async fn accept(_peer_id: Uuid, stream: MessageWsStream, _uri: Uri, backend:
         match stream.poll().await? {
             Message::Task(task) => {
                 debug!(target: stream.target(), "Job received: {:?}", &task);
-                backend.scheduler.submit(task);
+                backend.scheduler.submit(task).await;
             },
             m => {
                 debug!(target: stream.target(), "Incorrect message: {:?}", m);

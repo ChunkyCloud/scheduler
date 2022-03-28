@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crossbeam::atomic::AtomicCell;
 use futures_util::{SinkExt, StreamExt};
 use futures_util::stream::{SplitSink, SplitStream};
-use log::debug;
+use log::{debug, info};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::try_join;
 use tokio_tungstenite::WebSocketStream;
@@ -145,7 +145,9 @@ impl <T> MessageWsStreamHandler<T> where T: AsyncRead + AsyncWrite + Unpin {
                 debug!(target: target, "Received: {}", text);
                 match serde_json::from_str(text) {
                     Ok(m) => {
-                        tx_m_s.send_blocking(m).await?;
+                        if tx_m_s.send_blocking(m).await? {
+                            info!(target: target, "Messages being rate-limited!");
+                        }
                     }
                     Err(m) => {
                         debug!(target: target, "Invalid message: {}", m);

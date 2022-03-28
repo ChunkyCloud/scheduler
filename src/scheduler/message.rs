@@ -1,4 +1,4 @@
-use std::hash::{Hash, Hasher};
+use bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 use crate::util::error::{Result, Error};
 
@@ -39,23 +39,10 @@ pub struct AuthenticationMessage {
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct TaskMessage {
-    pub task_id: String,
+    #[serde(skip)]
+    pub task_id: Option<ObjectId>,
     pub job_id: String,
     pub spp: u32,
-}
-
-impl Hash for TaskMessage {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.task_id.hash(state);
-    }
-}
-
-impl Eq for TaskMessage {}
-
-impl PartialEq<Self> for TaskMessage {
-    fn eq(&self, other: &Self) -> bool {
-        self.task_id.eq(&other.task_id)
-    }
 }
 
 

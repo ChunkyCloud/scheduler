@@ -31,7 +31,7 @@ impl Backend {
         Backend {
             admin_token: admin_token.clone(),
             mongo_client: client.clone(),
-            scheduler: Arc::new(scheduler.create(client).await),
+            scheduler: scheduler.create(client).await,
         }
     }
 }

@@ -176,17 +176,20 @@ pub mod mpmc {
             Ok(())
         }
 
-        pub async fn send_blocking(&self, item: T) -> Result<(), Error> {
+        /// True if send was blocked.
+        pub async fn send_blocking(&self, item: T) -> Result<bool, Error> {
             let mut item = item;
+            let mut blocked = false;
             loop {
                 let waiter = self.channel.notify.notified();
                 match self.channel.queue.push(item) {
                     Err(i) => {
                         item = i;
+                        blocked = true;
                     }
                     Ok(_) => {
                         self.channel.notify.notify_waiters();
-                        return Ok(())
+                        return Ok(blocked)
                     }
                 }
                 if self.channel.closed.load(Ordering::Relaxed) {
