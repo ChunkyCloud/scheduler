@@ -1,30 +1,30 @@
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use async_channel::{Receiver, Sender};
 use crossbeam::atomic::AtomicCell;
 use futures_util::{SinkExt, StreamExt};
 use futures_util::stream::{SplitSink, SplitStream};
-use log::{debug, info};
+use log::debug;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::try_join;
 use tokio_tungstenite::WebSocketStream;
 use crate::scheduler::message::Message;
 use crate::util::error::Result;
-use crate::util::queue;
 
 /// We really shouldn't ever have more than a handful of messages buffered.
 const BUFFER_SIZE: usize = 8;
 
 #[derive(Clone)]
 pub struct MessageWsStream {
-    rx_message_receiver: queue::mpmc::Receiver<Message>,
-    tx_message_sender: queue::mpsc::Sender<NotifyingMessage>,
+    rx_message_receiver: Receiver<Message>,
+    tx_message_sender: Sender<NotifyingMessage>,
     target: String,
 }
 
 pub struct MessageWsStreamHandler<T> where T: AsyncRead + AsyncWrite + Unpin {
-    rx_message_sender: queue::mpmc::Sender<Message>,
-    tx_message_receiver: queue::mpsc::Receiver<NotifyingMessage>,
+    rx_message_sender: Sender<Message>,
+    tx_message_receiver: Receiver<NotifyingMessage>,
     message_stream: MessageWsStream,
     heartbeat_interval: Duration,
     stream: tokio_tungstenite::WebSocketStream<T>,
@@ -58,7 +58,7 @@ impl MessageWsStream {
     }
 
     pub async fn poll(&self) -> Result<Message> {
-        Ok(self.rx_message_receiver.poll().await?)
+        Ok(self.rx_message_receiver.recv().await?)
     }
 
     pub async fn close(&self) -> Result<()> {
@@ -82,8 +82,8 @@ impl MessageWsStream {
 
 impl <T> MessageWsStreamHandler<T> where T: AsyncRead + AsyncWrite + Unpin {
     pub fn new(stream: tokio_tungstenite::WebSocketStream<T>, target: &str, heartbeat_interval: &Duration) -> MessageWsStreamHandler<T> {
-        let (rx_m_s, rx_m_r) = queue::mpmc::new(BUFFER_SIZE);
-        let (tx_m_s, tx_m_r) = queue::mpsc::new(BUFFER_SIZE);
+        let (rx_m_s, rx_m_r) = async_channel::bounded(BUFFER_SIZE);
+        let (tx_m_s, tx_m_r) = async_channel::bounded(BUFFER_SIZE);
         MessageWsStreamHandler {
             rx_message_sender: rx_m_s,
             tx_message_receiver: tx_m_r,
@@ -119,12 +119,12 @@ impl <T> MessageWsStreamHandler<T> where T: AsyncRead + AsyncWrite + Unpin {
     }
 
     async fn handle_tx(mut sink: SplitSink<WebSocketStream<T>, tungstenite::Message>,
-                       tx_m_r: queue::mpsc::Receiver<NotifyingMessage>,
+                       tx_m_r: Receiver<NotifyingMessage>,
                        target: &str,
                        next_heartbeat: &AtomicCell<Instant>,
                        heartbeat_interval: &Duration) -> Result<()> {
         loop {
-            let message = tx_m_r.poll().await?;
+            let message = tx_m_r.recv().await?;
             debug!(target: target, "Sending: {:?}", message);
             sink.send(message.message).await?;
             message.notify.notify_waiters();
@@ -133,7 +133,7 @@ impl <T> MessageWsStreamHandler<T> where T: AsyncRead + AsyncWrite + Unpin {
     }
 
     async fn handle_rx(mut stream: SplitStream<WebSocketStream<T>>,
-                       tx_m_s: queue::mpmc::Sender<Message>,
+                       tx_m_s: Sender<Message>,
                        target: &str,
                        next_heartbeat: &AtomicCell<Instant>,
                        heartbeat_interval: &Duration) -> Result<()> {
@@ -145,22 +145,19 @@ impl <T> MessageWsStreamHandler<T> where T: AsyncRead + AsyncWrite + Unpin {
                 debug!(target: target, "Received: {}", text);
                 match serde_json::from_str(text) {
                     Ok(m) => {
-                        if tx_m_s.send_blocking(m).await? {
-                            info!(target: target, "Messages being rate-limited!");
-                        }
+                        tx_m_s.send(m).await?;
                     }
                     Err(m) => {
                         debug!(target: target, "Invalid message: {}", m);
                     }
                 }
-                tokio::task::yield_now().await;
             }
         }
         Ok(())
     }
 }
 
-async fn handle_heartbeat(sender: queue::mpsc::Sender<NotifyingMessage>,
+async fn handle_heartbeat(sender: Sender<NotifyingMessage>,
                           next_heartbeat: &AtomicCell<Instant>) -> Result<()> {
     loop {
         tokio::time::sleep_until(tokio::time::Instant::from(next_heartbeat.load())).await;

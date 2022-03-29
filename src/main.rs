@@ -23,36 +23,51 @@ use crate::scheduler::heap_scheduler::HeapSchedulerFactory;
 use crate::util::queue;
 use crate::util::websocket::{MessageWsStream, MessageWsStreamHandler};
 
-async fn accept_connection(peer: SocketAddr, stream: TcpStream, backend: Backend) {
-    if let Err(e) = handle_connection(peer, stream, backend).await {
-        match e {
-            Error::Ws(e) => {
-                match e.borrow() {
-                    tungstenite::Error::ConnectionClosed => (),
-                    tungstenite::Error::Protocol(_) => (),
-                    tungstenite::Error::Utf8 => (),
-                    e => error!("Error processing connection: {:?}", e),
-                }
-            },
-            Error::Serde(e) => {
-                error!("Error while (de)serializing: {:?}", e);
-            },
-            Error::Queue(e) => {
-                match e.borrow() {
-                    queue::Error::Closed => (),
-                    queue::Error::Full => error!("Full queue."),
-                }
+macro_rules! error_target {
+    (target: $target:expr, $($arg:tt)+) => {
+        if let Some(target) = $target {
+            error!(target: target, $($arg)+)
+        } else {
+            error!($($arg)+)
+        }
+    };
+}
+
+fn log_error(err: &Error, target: Option<&str>) {
+    match err {
+        Error::Ws(e) => {
+            match e.borrow() {
+                tungstenite::Error::ConnectionClosed => (),
+                tungstenite::Error::Protocol(_) => (),
+                tungstenite::Error::Utf8 => (),
+                e => error_target!(target: target, "Error processing connection: {:?}", e),
             }
-            Error::Mongo(e) => {
-                error!("MongoDB error: {:?}", e);
+        }
+        Error::Serde(e) => {
+            error_target!(target: target, "Error while (de)serializing: {:?}", e);
+        }
+        Error::Queue(e) => {
+            match e.borrow() {
+                queue::QueueError::Closed => (),
             }
-            Error::Generic(e) => {
-                error!("Error: {}", e);
-            }
+        }
+        Error::Mongo(e) => {
+            error_target!(target: target, "MongoDB error: {:?}", e);
+        }
+        Error::Generic(e) => {
+            error_target!(target: target, "Error: {}", e);
         }
     }
 }
 
+/// Handle a raw TCP connection
+async fn accept_connection(peer: SocketAddr, stream: TcpStream, backend: Backend) {
+    if let Err(e) = handle_connection(peer, stream, backend).await {
+        log_error(&e, None);
+    }
+}
+
+/// Create a websocket connection
 async fn handle_connection(peer: SocketAddr, stream: TcpStream, backend: Backend) -> Result<()> {
     let mut uri: Option<Uri> = None;
 
@@ -61,21 +76,17 @@ async fn handle_connection(peer: SocketAddr, stream: TcpStream, backend: Backend
         Ok(response)
     }).await {
         Ok(ws_stream) => {
+            // Give the connection a unique identifier for logging
             let peer_id = Uuid::new_v4();
             let peer_target = peer_id.to_string();
             info!(target: &peer_target, "New WebSocket connection: {}", peer);
 
+            // Message wrapper around the websocket stream
             let handler = MessageWsStreamHandler::new(ws_stream, &peer_target, &Duration::from_secs(30));
-            match try_join!(handle_endpoint(peer_id, handler.message_stream(), uri, backend), handler.handle()) {
-                Err(Error::Ws(e)) => {
-                    info!(target: &peer_target, "Websocket error: {:?}", e);
-                    return Err(Error::Ws(e));
-                },
-                Err(Error::Serde(e)) => {
-                    error!(target: &peer_target, "Uncaught (de)serialization error: {:?}", e);
-                    return Err(Error::Serde(e));
-                }
-                _ => {},
+
+            // Handle the connection and launch the wrapper
+            if let Err(e) = try_join!(handle_endpoint(peer_id, handler.message_stream(), uri, backend), handler.handle()) {
+                log_error(&e, Some(&peer_target));
             }
         }
         Err(_) => {
@@ -85,6 +96,7 @@ async fn handle_connection(peer: SocketAddr, stream: TcpStream, backend: Backend
     Ok(())
 }
 
+/// Handle a websocket connection
 async fn handle_endpoint(peer_id: Uuid, stream: MessageWsStream, uri: Option<Uri>, backend: Backend) -> Result<()> {
     match uri {
         None => {
@@ -95,7 +107,7 @@ async fn handle_endpoint(peer_id: Uuid, stream: MessageWsStream, uri: Option<Uri
             let path = uri.path();
             info!(target: &peer_id.to_string(), "Connection to: {}", path);
             match path {
-                "/apiserver" => endpoint::api_server::accept(peer_id, stream, uri, backend).await?,
+                "/apiserver" => endpoint::apiserver::accept(peer_id, stream, uri, backend).await?,
                 "/rendernode" => endpoint::rendernode::accept(peer_id, stream, uri, backend).await?,
                 _ => endpoint::invalid::accept(stream).await?,
             }
@@ -110,9 +122,9 @@ async fn main() {
 
     pretty_env_logger::formatted_builder()
         .filter_level(match cli.verbose {
-            0 => LevelFilter::Info,
-            1 => LevelFilter::Debug,
-            _ => LevelFilter::Trace,
+            0 => LevelFilter::Info,  // Default log level
+            1 => LevelFilter::Debug, // -v
+            _ => LevelFilter::Trace, // -vv
         })
         .init();
 
@@ -127,7 +139,7 @@ async fn main() {
     let backend = Backend::new(cli.admin_key, cli.mongo,
                                HeapSchedulerFactory {}).await;
 
-    let addr = "127.0.0.1:5700";
+    let addr = cli.address.unwrap_or("127.0.0.1:5700".to_string());
     let listener = TcpListener::bind(&addr)
         .await
         .expect(&*format!("Could not listen on: {}", addr));

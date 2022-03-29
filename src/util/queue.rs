@@ -1,260 +1,56 @@
-use std::collections::BinaryHeap;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use async_channel::{Receiver, Sender};
+use crate::util::error::{Result, Error};
 
 #[derive(Debug)]
-pub enum Error {
-    Full,
+pub enum QueueError {
     Closed,
 }
 
-struct BoundedChannel<T> {
-    queue: crossbeam::queue::ArrayQueue<T>,
-    notify: tokio::sync::Notify,
-    closed: AtomicBool,
+struct QueueImpl<T> {
+    sender: Sender<T>,
+    receiver: Receiver<T>,
 }
 
-pub mod mpsc {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use crate::util::queue::{BoundedChannel, Error};
+pub struct Queue<T> {
+    queue: Arc<QueueImpl<T>>
+}
 
-    pub fn new<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
-        let channel = Arc::new(BoundedChannel {
-            queue: crossbeam::queue::ArrayQueue::new(bound),
-            notify: tokio::sync::Notify::new(),
-            closed: AtomicBool::new(false),
-        });
-        (Sender { channel: channel.clone(), count: Arc::new(AtomicUsize::new(1)) }, Receiver { channel })
+impl <T> Queue<T> {
+    #[allow(dead_code)]
+    pub fn bounded(bound: usize) -> Queue<T> {
+        let (sender, receiver) = async_channel::bounded(bound);
+        Queue { queue: Arc::new(QueueImpl { sender, receiver } ) }
     }
 
-    pub struct Receiver<T> {
-        channel: Arc<BoundedChannel<T>>
+    pub fn unbounded() -> Queue<T> {
+        let (sender, receiver) = async_channel::unbounded();
+        Queue { queue: Arc::new(QueueImpl { sender, receiver } ) }
     }
 
-    impl <T> Receiver<T> {
-        pub async fn poll(&self) -> Result<T, Error> {
-            loop {
-                if let Some(item) = self.channel.queue.pop() {
-                    return Ok(item);
-                }
-                if self.channel.closed.load(Ordering::Relaxed) {
-                    return Err(Error::Closed);
-                }
-                self.channel.notify.notified().await;
-            }
-        }
-
-        pub fn close(&self) {
-            self.channel.closed.swap(true, Ordering::Relaxed);
-        }
-    }
-
-    impl <T> Drop for Receiver<T> {
-        fn drop(&mut self) {
-            self.close();
-        }
-    }
-
-    pub struct Sender<T> {
-        channel: Arc<BoundedChannel<T>>,
-        count: Arc<AtomicUsize>,
-    }
-
-    impl <T> Sender<T> {
-        pub async fn send(&self, item: T) -> Result<(), Error> {
-            if self.channel.queue.push(item).is_err() {
-                return Err(Error::Full);
-            }
-            if self.channel.closed.load(Ordering::Relaxed) {
-                return Err(Error::Closed);
-            }
-            self.channel.notify.notify_one();
+    pub async fn send(&self, message: T) -> Result<()> {
+        if self.queue.sender.send(message).await.is_ok() {
             Ok(())
-        }
-
-        pub fn close(&self) {
-            self.channel.closed.swap(true, Ordering::Relaxed);
+        } else {
+            Err(Error::from(QueueError::Closed))
         }
     }
 
-    impl <T> Clone for Sender<T> {
-        fn clone(&self) -> Self {
-            self.count.fetch_add(1, Ordering::Relaxed);
-            Sender {
-                channel: self.channel.clone(),
-                count: self.count.clone(),
-            }
-        }
-    }
-
-    impl <T> Drop for Sender<T> {
-        fn drop(&mut self) {
-            if self.count.fetch_sub(1, Ordering::Relaxed) == 0 {
-                self.close();
-            }
-        }
-    }
-}
-
-pub mod mpmc {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use crate::util::queue::{BoundedChannel, Error};
-
-    pub fn new<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
-        let channel = Arc::new(BoundedChannel {
-            queue: crossbeam::queue::ArrayQueue::new(bound),
-            notify: tokio::sync::Notify::new(),
-            closed: AtomicBool::new(false),
-        });
-        (
-            Sender { channel: channel.clone(), count: Arc::new(AtomicUsize::new(1)) },
-            Receiver { channel, count: Arc::new(AtomicUsize::new(1)) }
-        )
-    }
-
-    pub struct Receiver<T> {
-        channel: Arc<BoundedChannel<T>>,
-        count: Arc<AtomicUsize>,
-    }
-
-    impl <T> Receiver<T> {
-        pub async fn poll(&self) -> Result<T, Error> {
-            loop {
-                let waiter = self.channel.notify.notified();
-                if let Some(item) = self.channel.queue.pop() {
-                    self.channel.notify.notify_waiters();
-                    return Ok(item);
-                }
-                if self.channel.closed.load(Ordering::Relaxed) {
-                    return Err(Error::Closed);
-                }
-                waiter.await;
-            }
-        }
-
-        pub fn close(&self) {
-            self.channel.closed.swap(true, Ordering::Acquire);
-            self.channel.notify.notify_waiters();
-        }
-    }
-
-    impl <T> Clone for Receiver<T> {
-        fn clone(&self) -> Self {
-            self.count.fetch_add(1, Ordering::Relaxed);
-            Receiver {
-                channel: self.channel.clone(),
-                count: self.count.clone(),
-            }
-        }
-    }
-
-    impl <T> Drop for Receiver<T> {
-        fn drop(&mut self) {
-            if self.count.fetch_sub(1, Ordering::Relaxed) == 0 {
-                self.close();
-            }
-        }
-    }
-
-    pub struct Sender<T> {
-        channel: Arc<BoundedChannel<T>>,
-        count: Arc<AtomicUsize>,
-    }
-
-    impl <T> Sender<T> {
-        #[allow(dead_code)]
-        pub async fn send(&self, item: T) -> Result<(), Error> {
-            if self.channel.queue.push(item).is_err() {
-                return Err(Error::Full);
-            }
-            if self.channel.closed.load(Ordering::Relaxed) {
-                return Err(Error::Closed);
-            }
-            self.channel.notify.notify_waiters();
-            Ok(())
-        }
-
-        /// True if send was blocked.
-        pub async fn send_blocking(&self, item: T) -> Result<bool, Error> {
-            let mut item = item;
-            let mut blocked = false;
-            loop {
-                let waiter = self.channel.notify.notified();
-                match self.channel.queue.push(item) {
-                    Err(i) => {
-                        item = i;
-                        blocked = true;
-                    }
-                    Ok(_) => {
-                        self.channel.notify.notify_waiters();
-                        return Ok(blocked)
-                    }
-                }
-                if self.channel.closed.load(Ordering::Relaxed) {
-                    return Err(Error::Closed);
-                }
-                waiter.await;
-            }
-        }
-
-        pub fn close(&self) {
-            self.channel.closed.swap(true, Ordering::Acquire);
-            self.channel.notify.notify_waiters();
-        }
-    }
-
-    impl <T> Clone for Sender<T> {
-        fn clone(&self) -> Self {
-            self.count.fetch_add(1, Ordering::Relaxed);
-            Sender {
-                channel: self.channel.clone(),
-                count: self.count.clone(),
-            }
-        }
-    }
-
-    impl <T> Drop for Sender<T> {
-        fn drop(&mut self) {
-            if self.count.fetch_sub(1, Ordering::Relaxed) == 0 {
-                self.close();
-            }
-        }
-    }
-}
-
-
-#[derive(Clone)]
-pub struct PriorityQueue<T> {
-    heap: Arc<Mutex<BinaryHeap<T>>>,
-    notify: Arc<tokio::sync::Notify>,
-}
-
-impl <T> PriorityQueue<T> where T: Ord {
-    pub fn new() -> PriorityQueue<T> {
-        PriorityQueue {
-            heap: Arc::new(Mutex::new(BinaryHeap::new())),
-            notify: Arc::new(tokio::sync::Notify::new()),
+    pub async fn poll(&self) -> Result<T> {
+        if let Ok(v) = self.queue.receiver.recv().await {
+            Ok(v)
+        } else {
+            Err(Error::from(QueueError::Closed))
         }
     }
 
     pub fn len(&self) -> usize {
-        self.heap.lock().unwrap().len()
+        self.queue.receiver.len()
     }
 
-    pub fn push(&self, item: T) {
-        self.heap.lock().unwrap().push(item);
-        self.notify.notify_waiters();
-    }
-
-    pub async fn poll(&self) -> T {
-        loop {
-            let waiter = self.notify.notified();
-            if let Some(item) = self.heap.lock().unwrap().pop() {
-                return item;
-            }
-            waiter.await;
-        }
+    #[allow(dead_code)]
+    pub fn close(&self) {
+        self.queue.sender.close();
+        self.queue.receiver.close();
     }
 }

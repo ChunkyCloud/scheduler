@@ -1,3 +1,4 @@
+use crate::queue::QueueError;
 use crate::util::queue;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -7,7 +8,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     Ws(Box<tungstenite::Error>),
     Serde(Box<serde_json::Error>),
-    Queue(Box<queue::Error>),
+    Queue(Box<queue::QueueError>),
     Mongo(Box<mongodb::error::Error>),
     Generic(String),
 }
@@ -24,9 +25,21 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-impl From<queue::Error> for Error {
-    fn from(e: queue::Error) -> Self {
+impl From<queue::QueueError> for Error {
+    fn from(e: queue::QueueError) -> Self {
         Error::Queue(Box::new(e))
+    }
+}
+
+impl <T> From<async_channel::SendError<T>> for Error {
+    fn from(_: async_channel::SendError<T>) -> Self {
+        Error::Queue(Box::new(QueueError::Closed))
+    }
+}
+
+impl From<async_channel::RecvError> for Error {
+    fn from(_: async_channel::RecvError) -> Self {
+        Error::Queue(Box::new(QueueError::Closed))
     }
 }
 

@@ -14,4 +14,8 @@ pub struct Args {
     /// Set verbosity level.
     #[clap(short, long, parse(from_occurrences))]
     pub verbose: usize,
+
+    /// Set the listening address
+    #[clap(long)]
+    pub address: Option<String>,
 }

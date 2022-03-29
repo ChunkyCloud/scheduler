@@ -1,7 +1,5 @@
-use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bson::doc;
@@ -12,23 +10,25 @@ use mongodb::Client;
 use mongodb::options::ReplaceOptions;
 use tokio::sync::mpsc;
 use serde::{Serialize, Deserialize};
-use crate::queue;
+use tokio::select;
+use crate::queue::{Queue, QueueError};
 use crate::scheduler::message::TaskMessage;
 use crate::scheduler::{Scheduler, SchedulerFactory};
+use crate::scheduler::heap_scheduler::TaskPriority::Standard;
 use crate::scheduler::heap_scheduler::TaskStatus::Completed;
 use crate::util::error::Result;
 use crate::util::error::Error;
 
-/// Standard priority
-const STANDARD: u8 = 4;
-/// Rescheduled priority
-const RESCHEDULED: u8 = 8;
-
 pub struct HeapScheduler {
-    to_schedule: queue::PriorityQueue<PrioritizedTask>,
+    to_scheduled: Queue<Task>,
+    re_scheduled: Queue<Task>,
     scheduled: Mutex<HashSet<Task>>,
-    order: AtomicUsize,
     mongo_update: mpsc::Sender<Task>,
+}
+
+enum TaskPriority {
+    Standard,
+    Rescheduled,
 }
 
 pub struct HeapSchedulerFactory;
@@ -52,26 +52,6 @@ struct Task {
     spp: u32,
     status: TaskStatus,
     scheduler: String
-}
-
-struct PrioritizedTask {
-    task: Task,
-    priority: u8,
-    order: usize,
-}
-
-impl Eq for PrioritizedTask {}
-
-impl PartialEq<Self> for PrioritizedTask {
-    fn eq(&self, other: &Self) -> bool {
-        self.priority == other.priority
-    }
-}
-
-impl PartialOrd<Self> for PrioritizedTask {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 impl Hash for Task {
@@ -114,25 +94,7 @@ impl Task {
     }
 }
 
-impl Ord for PrioritizedTask {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match self.priority.cmp(&other.priority) {
-            Ordering::Equal => self.order.cmp(&other.order),
-            o => o,
-        }
-    }
-}
-
 impl HeapScheduler {
-    fn get_task(&self, task: Task, priority: u8) -> PrioritizedTask {
-        let order = self.order.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        PrioritizedTask {
-            task,
-            priority,
-            order
-        }
-    }
-
     async fn mongo_sync(mongo: Option<Client>, mut recv: mpsc::Receiver<Task>) {
         if let Some(client) = mongo {
             let collection = client
@@ -154,26 +116,36 @@ impl HeapScheduler {
             }
         }
     }
+
+    async fn schedule_task(&self, task: Task, priority: TaskPriority) -> Result<()> {
+        match priority {
+            TaskPriority::Standard => self.to_scheduled.send(task).await,
+            TaskPriority::Rescheduled => self.re_scheduled.send(task).await,
+        }
+    }
 }
 
 #[async_trait]
 impl Scheduler for HeapScheduler {
-    async fn submit(&self, task: TaskMessage) {
+    async fn submit(&self, task: TaskMessage) -> Result<()> {
         let task = Task::new(task);
-        {
-            let task = self.get_task(task.clone(), STANDARD);
-            self.to_schedule.push(task);
-        }
+        self.schedule_task(task.clone(), Standard).await?;
         self.mongo_update.send(task).await.unwrap();
+        Ok(())
     }
 
-    async fn poll(&self) -> TaskMessage {
-        let task = self.to_schedule.poll().await;
-        let mut task = task.task;
+    async fn poll(&self) -> Result<TaskMessage> {
+        let mut task: Task = select! {
+            biased;  // Make sure re-scheduled tasks are scheduled first
+            Ok(t) = self.re_scheduled.poll() => t,
+            Ok(t) = self.to_scheduled.poll() => t,
+            else => return Err(Error::from(QueueError::Closed)),
+        };
         task.status = TaskStatus::Scheduled;
         let out = task.to_message();
+        self.scheduled.lock().unwrap().insert(task.clone());
         self.mongo_update.send(task).await.unwrap();
-        return out;
+        return Ok(out);
     }
 
     async fn complete(&self, task: TaskMessage) -> Result<()> {
@@ -199,16 +171,20 @@ impl Scheduler for HeapScheduler {
                 task_id: id,
                 job_id: task.job_id,
                 spp: task.spp,
-                status: TaskStatus::Queued,
+                status: TaskStatus::Scheduled,
                 scheduler: "heap".to_string(),
             };
             self.scheduled.lock().unwrap().remove(&task);
-            self.to_schedule.push(self.get_task(task.clone(), RESCHEDULED));
+            self.schedule_task(task.clone(), TaskPriority::Rescheduled).await?;
             self.mongo_update.send(task).await.unwrap();
             Ok(())
         } else {
             Err(Error::Generic(format!("Attempted to complete unknown task: {:?}", task)))
         }
+    }
+
+    fn task_count(&self) -> usize {
+        self.to_scheduled.len() + self.re_scheduled.len()
     }
 }
 
@@ -220,9 +196,9 @@ impl SchedulerFactory<HeapScheduler> for HeapSchedulerFactory {
         tokio::spawn(HeapScheduler::mongo_sync(mongo.clone(), recv));
 
         let scheduler = Arc::new(HeapScheduler {
-            to_schedule: queue::PriorityQueue::new(),
+            re_scheduled: Queue::unbounded(),
+            to_scheduled: Queue::unbounded(),
             scheduled: Mutex::new(HashSet::new()),
-            order: AtomicUsize::new(0),
             mongo_update: send,
         });
 
@@ -235,13 +211,8 @@ impl SchedulerFactory<HeapScheduler> for HeapSchedulerFactory {
             if let Ok(mut cursor) = cursor {
                 while let Ok(Some(task)) = cursor.try_next().await {
                     match task.status {
-                        TaskStatus::Queued => scheduler.to_schedule.push(scheduler.get_task(task, STANDARD)),
-                        TaskStatus::Scheduled => {
-                            let mut task = task.clone();
-                            task.status = TaskStatus::Queued;
-                            scheduler.mongo_update.send(task.clone()).await.unwrap();
-                            scheduler.to_schedule.push(scheduler.get_task(task, RESCHEDULED));
-                        },
+                        TaskStatus::Queued => { scheduler.schedule_task(task, TaskPriority::Standard).await.unwrap(); }
+                        TaskStatus::Scheduled => { scheduler.schedule_task(task, TaskPriority::Rescheduled).await.unwrap(); }
                         _ => {},
                     }
                 }
@@ -249,7 +220,8 @@ impl SchedulerFactory<HeapScheduler> for HeapSchedulerFactory {
                 warn!("Failed to load tasks from MongoDB.");
             }
         }
-        info!("Created HeapScheduler with {} tasks.", scheduler.to_schedule.len());
+        info!("Created HeapScheduler with {} tasks ({} were queued, {} were scheduled).",
+            scheduler.task_count(), scheduler.to_scheduled.len(), scheduler.re_scheduled.len());
         return scheduler;
     }
 }
