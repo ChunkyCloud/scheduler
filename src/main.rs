@@ -37,9 +37,7 @@ fn log_error(err: &Error, target: Option<&str>) {
     match err {
         Error::Ws(e) => {
             match e.borrow() {
-                tungstenite::Error::ConnectionClosed => (),
-                tungstenite::Error::Protocol(_) => (),
-                tungstenite::Error::Utf8 => (),
+                tungstenite::Error::ConnectionClosed => if let Some(target) = target { info!(target: target, "Connection closed") }
                 e => error_target!(target: target, "Error processing connection: {:?}", e),
             }
         }
@@ -48,7 +46,7 @@ fn log_error(err: &Error, target: Option<&str>) {
         }
         Error::Queue(e) => {
             match e.borrow() {
-                queue::QueueError::Closed => (),
+                queue::QueueError::Closed =>  if let Some(target) = target { info!(target: target, "Connection closed.") },
             }
         }
         Error::Mongo(e) => {
@@ -87,6 +85,8 @@ async fn handle_connection(peer: SocketAddr, stream: TcpStream, backend: Backend
             // Handle the connection and launch the wrapper
             if let Err(e) = try_join!(handle_endpoint(peer_id, handler.message_stream(), uri, backend), handler.handle()) {
                 log_error(&e, Some(&peer_target));
+            } else {
+                info!(target: &peer_target, "Connection closed")
             }
         }
         Err(_) => {
@@ -139,7 +139,7 @@ async fn main() {
     let backend = Backend::new(cli.admin_key, cli.mongo,
                                HeapSchedulerFactory {}).await;
 
-    let addr = cli.address.unwrap_or("127.0.0.1:5700".to_string());
+    let addr = cli.address.unwrap_or_else(|| "127.0.0.1:5700".to_string());
     let listener = TcpListener::bind(&addr)
         .await
         .expect(&*format!("Could not listen on: {}", addr));
