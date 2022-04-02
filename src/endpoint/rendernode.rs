@@ -5,10 +5,13 @@ use tokio::runtime::Handle;
 use tungstenite::http::Uri;
 use uuid::Uuid;
 use crate::{Backend, MessageWsStream};
-use crate::scheduler::message::{Message, TaskMessage};
+use crate::scheduler::message::{Message, ServerInfoMessage, TaskMessage};
 use crate::util::error::Result;
 
 pub async fn accept(_peer_id: Uuid, stream: MessageWsStream, _uri: Uri, backend: Backend) -> Result<()> {
+    // Give server information
+    stream.send(Message::ServerInfo(ServerInfoMessage::new())).await?;
+
     // Authenticate
     stream.send(Message::AuthenticationRequest()).await?;
     match stream.poll().await? {
@@ -21,6 +24,7 @@ pub async fn accept(_peer_id: Uuid, stream: MessageWsStream, _uri: Uri, backend:
                     .collection::<Document>("users")
                     .find_one(filter, None)
                     .await? {
+                    // TODO: Use api server
 
                     // User found
                     info!(target: stream.target(), "User authenticated: {}", user.get_str("username").unwrap_or("<UNKNOWN>"));
@@ -37,6 +41,7 @@ pub async fn accept(_peer_id: Uuid, stream: MessageWsStream, _uri: Uri, backend:
             return stream.close().await;
         }
     }
+    stream.send(Message::AuthenticationOk()).await?;
 
     // Handle task messages
     loop {

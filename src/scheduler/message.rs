@@ -9,10 +9,16 @@ pub enum Message {
     /// Some warning that should be conveyed to the node. Connection will not be closed.
     Warning(WarningMessage),
 
+    /// A server information message. The client should close the connection if the server
+    /// is incompatible with the client. The client may log any informational fields.
+    ServerInfo(ServerInfoMessage),
+
     /// A request for authentication.
     AuthenticationRequest(),
     /// An authentication response message with a token.
     Authentication(AuthenticationMessage),
+    /// Successfully authenticated.
+    AuthenticationOk(),
 
     /// A request for a task.
     TaskGet(),
@@ -56,5 +62,18 @@ impl Message {
     
     pub fn error_message(message: &str) -> Message {
         Message::Error(ErrorMessage { message: message.to_string() })
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ServerInfoMessage {
+    pub protocol_version: u32,
+}
+
+impl ServerInfoMessage {
+    pub fn new() -> ServerInfoMessage {
+        ServerInfoMessage {
+            protocol_version: 0
+        }
     }
 }
